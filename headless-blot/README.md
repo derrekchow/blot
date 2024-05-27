@@ -22,7 +22,7 @@ On the RPi in the `headless-blot` directory run:
 
 ## Running
 1. Start the Motion daemon: `sudo systemctl start motion`
-2. Start the server: `yarn run`
+2. Start the server: `sudo yarn run`
 3. To test, upload a blot code file (.js) to the "Teleblot" Slack Bot on the Hack Club Slack, you should receive 1) a video of the Blot drawing your sketch and 2) an image of the result.
 
 ### Note

@@ -1,10 +1,10 @@
-import 'dotenv';
+import 'dotenv/config';
 import slackbolt from '@slack/bolt';
 const { App } = slackbolt;
-import { createReadStream } from 'fs';
+import { createReadStream, unlinkSync } from 'fs';
 
-import rpigpio from 'rpi-gpio';
-const { promise: gpio } = rpigpio;
+import { init } from 'raspi';
+import { DigitalOutput, LOW, HIGH } from 'raspi-gpio';
 
 import { runCodeInner } from "../src/runCodeInner.js";
 import { makeIncluded } from "../src/makeIncluded.js";
@@ -24,10 +24,14 @@ const app = new App({
   port:           process.env.PORT
 });
 
+// console.log(await SerialPort.list())
+
 const config = {
   MOCK_SERIAL:  false, // set false to test without a Blot connected
   BAUD:         9600,
-  BOARD_PIN:    7, // GPIO 7 on RPi
+  BOARD_PIN:    'GPIO4', // GPIO 2 on RPi,
+  CLAMP_MAX:    120,
+  CLAMP_MIN:    0
 }
 
 let port;
@@ -37,14 +41,16 @@ if (config.MOCK_SERIAL) { // simulates open serial port (no response back)
   port = new SerialPortMock({
     path,
     baudRate: config.BAUD,
-    autoOpen: false
+    autoOpen: false,
+    endOnClose: true
   });
 }
 else {
   port = new SerialPort({
     path,
     baudRate: config.BAUD,
-    autoOpen: false
+    autoOpen: false,
+    endOnClose: true
   });
 }
 
@@ -53,29 +59,19 @@ const haxidraw = await createHaxidraw(comsBuffer);
 
 // draw path to move the Blot head back to origin
 const resetTurtles = await runSync(`
-    drawLines([
-      [
-        [0, 0], [100, 100]
-      ]
-    ])
-  `)
-
-const rpi = {
-  pin: config.BOARD_PIN,
-  setup() {
-    return gpio.setup(this.pin, gpio.DIR_OUT);
-  },
-  write(val) { // uses BOARD_PIN to clear the LCD Writing Tablet
-    return gpio.write(this.pin, val);
-  }
-}
+  drawLines([
+    [
+      [0, 0]
+    ]
+  ])
+`)
 
 // controls the USB webcam using Motion library on the RPi
 const webCam = {
   baseUrl: process.env.MOTION_URL,
   filePath: process.env.MOTION_FILEPATH,
   command(str) {
-    // console.log(this.baseUrl + str);
+    console.log(this.baseUrl + str);
     return fetch(this.baseUrl + str);
   },
   start() {
@@ -110,36 +106,77 @@ async function fetchSlackFile(fileUrl) {
   return body;
 }
 
-const sendSlackFile = async (channelId, fileName, comment = '') => (
-  app.client.files.uploadV2({
-    channels:         channelId,
-    initial_comment:  comment,
-    file:             createReadStream(fileName),
-    filename:         fileName
-  })
+const sendSlackFile = async (channelId, filePath, name='', comment = '') => {
+  try {
+    await app.client.files.uploadV2({
+      channel_id:       channelId,
+      initial_comment:  comment,
+      file:             createReadStream(filePath),
+      filename:         name
+    });
+    unlinkSync(filePath);
+  }
+  catch (e) {
+    console.log(e.message);
+  }
+}
+
+const scale = (value, low1, high1, low2, high2) => (
+  low2 + (high2 - low2) * (value - low1) / (high1 - low1)
 )
 
-const runMachine = (turtles) => runMachineHelper(haxidraw, turtles);
+const scaleTurtles = (turtles) => {
+  let max = config.CLAMP_MAX;
+  let min = config.CLAMP_MIN;
+
+  turtles[0].path.forEach((arr) => {
+    arr.forEach( (subarr) => {
+      subarr.forEach( val => {
+        if (val > max) {
+          max = val;
+        }
+        if (val < min) {
+          min = val;
+        }
+      })
+    })
+  });
+
+  if (max != config.CLAMP_MAX || min != config.CLAMP_MIN) {
+    turtles[0].path = turtles[0].path.map(arr => (
+      arr.map(subarr => subarr.map( val => scale(val, min, max, 0, config.CLAMP_MAX)))
+    ))
+  }
+
+  return turtles;
+}
+
+const runMachine = (turtles) => {
+  return runMachineHelper(haxidraw, scaleTurtles(turtles));
+}
+
+function clearBoard() {
+  init(async () => {
+    const output = new DigitalOutput(config.BOARD_PIN);
+    output.write(HIGH);
+    await sleep(0.2);
+    output.write(LOW);
+  });
+}
 
 // set the Blot head back to origin and clear the LCD Writing Tablet and
 async function resetMachine() {
   await runMachine(resetTurtles);
-  await clearBoard();
+  clearBoard();
 }
 
-const sleep = (ms) => (
+const sleep = (s) => (
   new Promise((resolve) => {
-    setTimeout(resolve, ms);
+    setTimeout(resolve, s*1000);
   })
 );
 
-async function clearBoard() {
-  await rpi.write(true);
-  await sleep(100);
-  await rpi.write(false);
-}
-
-async function onMessage(message) {
+async function onMessage(message, say) {
   if (!message.files) return;
 
   const fileUrl = message.files[0].url_private; // get the uploaded .js filename
@@ -147,21 +184,28 @@ async function onMessage(message) {
 
   const turtles = await runSync(code); // try to run the blot code and generate path
 
-  let filename = await webCam.startEvent();
-  filename = webCam.filePath + '/' + filename;
+  const datetime = await webCam.startEvent();
+  const filename = webCam.filePath + '/' + datetime;
+
+  say("I'm drawing your code at teleblot.hackclub.com, I'll send you a clip when its done!");
+
+  clearBoard();
 
   await runMachine(turtles); // send drawing path to the Blot over serial
+
+  await sleep(5);
   await webCam.endEvent(); // creates recording and snapshot files
+  // await sleep(10);
 
   // sends recording and snapshot via Slack
-  await sendSlackFile(message.channel, filename + '.mkv');
-  await sendSlackFile(message.channel, filename + '.jpg');
+  await sendSlackFile(message.channel, filename + '.mkv', datetime + '.mkv');
+  await sendSlackFile(message.channel, filename + '.jpg', datetime + '.jpg');
 }
 
 (async () => {
+  await app.stop()
   await app.start();
   await webCam.start();
-  await rpi.setup();
 
   await resetMachine();
 
@@ -172,18 +216,26 @@ async function onMessage(message) {
 app.message(async ({ message, say }) => {
   try {
     if (running) {
-      throw new Error("The Blot is currently drawing, please try again later.")
+      say("Sorry I could not run your code because I'm currently drawing at teleblot.hackclub.com, please try again later.");
+      return;
     }
     running = true;
-    await onMessage(message);
-    running = false;
+    await onMessage(message, say);
   }
   catch (error) {
     console.log(error.message);
-    say('Coud not run code: "' + error.message + '"'); // sends error message in Slack
+    say('Sorry I could not run your code: "' + error.message + '"'); // sends error message in Slack
   }
-  finally {
-    await resetMachine();
-  }
+  running = false;
 })
 
+process.on('uncaughtException', function (err) {       
+  console.log(err);
+  process.exit(1);
+});
+
+process.on('exit', () => {
+  console.log("stopping server...")
+  port.close();
+  webCam.endEvent();
+});

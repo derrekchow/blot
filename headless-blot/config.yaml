@@ -1,0 +1,5 @@
+teleblot:
+  type: http
+  subdomain: teleblot
+  region: us
+  to: localhost:8081

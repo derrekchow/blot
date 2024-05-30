@@ -29,7 +29,7 @@ const app = new App({
 const config = {
   MOCK_SERIAL:  false, // set false to test without a Blot connected
   BAUD:         9600,
-  BOARD_PIN:    'GPIO4', // GPIO 2 on RPi,
+  BOARD_PIN:    'GPIO4', // GPIO 4 on RPi,
   CLAMP_MAX:    120,
   CLAMP_MIN:    0
 }
@@ -114,10 +114,12 @@ const sendSlackFile = async (channelId, filePath, name='', comment = '') => {
       file:             createReadStream(filePath),
       filename:         name
     });
-    unlinkSync(filePath);
   }
   catch (e) {
     console.log(e.message);
+  }
+  finally {
+    unlinkSync(filePath);
   }
 }
 
@@ -129,23 +131,28 @@ const scaleTurtles = (turtles) => {
   let max = config.CLAMP_MAX;
   let min = config.CLAMP_MIN;
 
-  turtles[0].path.forEach((arr) => {
-    arr.forEach( (subarr) => {
-      subarr.forEach( val => {
-        if (val > max) {
-          max = val;
-        }
-        if (val < min) {
-          min = val;
-        }
+  turtles.forEach(turtle => {
+    turtle.path.forEach(points => {
+      points.forEach( point => {
+        point.forEach( val => {
+          if (val > max) {
+            max = val;
+          }
+          if (val < min) {
+            min = val;
+          }
+        })
       })
-    })
+    });
   });
 
+  
   if (max != config.CLAMP_MAX || min != config.CLAMP_MIN) {
-    turtles[0].path = turtles[0].path.map(arr => (
-      arr.map(subarr => subarr.map( val => scale(val, min, max, 0, config.CLAMP_MAX)))
-    ))
+    turtles.forEach(turtle => {
+      turtle.path = turtle.path.map(points => (
+        points.map(point => point.map( val => scale(val, min, max, config.CLAMP_MIN, config.CLAMP_MAX)))
+      ))
+    })
   }
 
   return turtles;
@@ -206,6 +213,7 @@ async function onMessage(message, say) {
   await app.stop()
   await app.start();
   await webCam.start();
+  await webCam.endEvent();
 
   await resetMachine();
 
